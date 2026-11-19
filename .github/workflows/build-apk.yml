@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Test & Build Downloadable APK
+    name: Test & Build Release / Debug APK
     runs-on: ubuntu-latest
 
     steps:
@@ -40,7 +40,11 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
           "$SDKMANAGER" --install "platforms;android-36.1" "build-tools;36.0.0" "platform-tools" || true
 
-      - name: Prepare debug keystore
+      - name: Prepare debug & release keystores
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
@@ -56,6 +60,20 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "${{ github.workspace }}/my-upload-key.jks"
+            echo "KEYSTORE_PATH=${{ github.workspace }}/my-upload-key.jks" >> "$GITHUB_ENV"
+          else
+            cp debug.keystore "${{ github.workspace }}/my-upload-key.jks"
+            keytool -changealias \
+              -keystore "${{ github.workspace }}/my-upload-key.jks" \
+              -storepass android \
+              -alias androiddebugkey \
+              -destalias upload \
+              -keypass android
+            echo "KEYSTORE_PATH=${{ github.workspace }}/my-upload-key.jks" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -64,40 +82,33 @@ jobs:
       - name: Run Unit & Robolectric Tests
         run: gradle :app:testDebugUnitTest --no-daemon
 
+      - name: Build Release APK
+        env:
+          SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          export STORE_PASSWORD="${SECRET_STORE_PASSWORD:-android}"
+          export KEY_PASSWORD="${SECRET_KEY_PASSWORD:-android}"
+          gradle :app:assembleRelease --no-daemon
+
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon
-
-      - name: Build Release APK (when signing secrets are configured)
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
-            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "${{ github.workspace }}/my-upload-key.jks"
-            export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
-            gradle :app:assembleRelease --no-daemon
-          else
-            echo "RELEASE_KEYSTORE_BASE64 not set; skipping release APK."
-          fi
 
       - name: Stage APK files for download
         run: |
           mkdir -p release-artifacts
+          cp app/build/outputs/apk/release/app-release.apk release-artifacts/DialecticSelf-release.apk
           cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/DialecticSelf-debug.apk
-          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk release-artifacts/DialecticSelf-release.apk
-          fi
           ls -lh release-artifacts/
 
-      - name: Upload APK to GitHub Actions Artifacts
+      - name: Upload APKs to GitHub Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: DialecticSelf-APK
+          name: DialecticSelf-APKs
           path: release-artifacts/*.apk
           if-no-files-found: error
 
-      - name: Publish directly downloadable APK to GitHub Releases
+      - name: Publish directly downloadable APKs to GitHub Releases
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
@@ -105,7 +116,8 @@ jobs:
           name: ${{ startsWith(github.ref, 'refs/tags/') && format('双生思辨 {0}', github.ref_name) || '双生思辨 (DialecticSelf) 最新 APK' }}
           body: |
             由 GitHub Actions 自动构建的 Android 安装包（已内嵌离线中英双语 Sherpa-ONNX 语音识别模型，支持安装即用）：
-            - `DialecticSelf-debug.apk`：已签名通用安装包（支持真机与模拟器直接安装）
+            - `DialecticSelf-release.apk`：**正式 Release 版安装包（推荐日常安装）**
+            - `DialecticSelf-debug.apk`：调试 Debug 版安装包
             - 构建提交：`${{ github.sha }}`
           prerelease: false
           make_latest: true
