@@ -1,0 +1,6 @@
+{
+  "name": "双生思辨",
+  "description": "主体与客体双重视角自我辩证与苏格拉底式内心档案应用，支持实时语音思辨捕捉、哲学档案回溯与对偶人格调谐。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

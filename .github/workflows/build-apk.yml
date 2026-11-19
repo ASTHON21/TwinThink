@@ -1,0 +1,106 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "**" ]
+    tags: [ "v*" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Test & Build Downloadable APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses & ensure platform 36.1
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-36.1" "build-tools;36.0.0" >/dev/null 2>&1 || true
+
+      - name: Prepare debug keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Run Unit & Robolectric Tests
+        run: gradle :app:testDebugUnitTest --no-daemon
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Build Release APK (when signing secrets are configured)
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "${{ github.workspace }}/my-upload-key.jks"
+            export KEYSTORE_PATH="${{ github.workspace }}/my-upload-key.jks"
+            gradle :app:assembleRelease --no-daemon
+          else
+            echo "RELEASE_KEYSTORE_BASE64 not set; skipping release APK."
+          fi
+
+      - name: Stage APK files for download
+        run: |
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk release-artifacts/DialecticSelf-debug.apk
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk release-artifacts/DialecticSelf-release.apk
+          fi
+          ls -lh release-artifacts/
+
+      - name: Upload APK to GitHub Actions Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DialecticSelf-APK
+          path: release-artifacts/*.apk
+          if-no-files-found: error
+
+      - name: Publish directly downloadable APK to GitHub Releases
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest-apk' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && format('双生思辨 {0}', github.ref_name) || '双生思辨 (DialecticSelf) 最新 APK' }}
+          body: |
+            由 GitHub Actions 自动构建的 Android 安装包（已内嵌离线中英双语 Sherpa-ONNX 语音识别模型，支持安装即用）：
+            - `DialecticSelf-debug.apk`：已签名通用安装包（支持真机与模拟器直接安装）
+            - 构建提交：`${{ github.sha }}`
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          make_latest: true
+          files: |
+            release-artifacts/*.apk
